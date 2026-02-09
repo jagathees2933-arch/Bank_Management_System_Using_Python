@@ -1,16 +1,25 @@
 from flask import Flask, render_template, request, redirect, url_for, session, flash
 from db_connection import get_db_connection
+from init_db import init_database
+import mysql.connector
 import hashlib
+import os
 from functools import wraps
-from datetime import date
 
 app = Flask(__name__)
-app.secret_key = 'your_secret_key_change_this_in_production'
+app.secret_key = os.environ.get('SECRET_KEY', 'fallback-secret-key-change-in-production')
+
+
+# ──────────────────────────────────────────
+#  Initialize database tables on startup
+# ──────────────────────────────────────────
+with app.app_context():
+    init_database()
 
 
 # ──────────────────────────────────────────
 #  Utility Functions
-# ───────��──────────────────────────────────
+# ──────────────────────────────────────────
 
 def hash_password(password):
     """Hash password using SHA-256."""
@@ -49,19 +58,18 @@ def get_account_balance(connection, account_number):
 
 def record_transaction(cursor, account_number, txn_type, amount, balance_after, related_account, description):
     """Insert a transaction record."""
-    query = """INSERT INTO transactions 
+    query = """INSERT INTO transactions
                (account_number, transaction_type, amount, balance_after, related_account, description)
                VALUES (%s, %s, %s, %s, %s, %s)"""
     cursor.execute(query, (account_number, txn_type, amount, balance_after, related_account, description))
 
 
-# ──────────────────────────────────────────
+# ───────────────────���──────────────────────
 #  Authentication Routes
 # ──────────────────────────────────────────
 
 @app.route('/')
 def home():
-    """Landing page - redirect to dashboard or login."""
     if 'user_id' in session:
         if session['role'] == 'Admin':
             return redirect(url_for('admin_dashboard'))
@@ -71,7 +79,6 @@ def home():
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    """User login page."""
     if request.method == 'POST':
         username = request.form['username']
         password = hash_password(request.form['password'])
@@ -96,13 +103,14 @@ def login():
                 return redirect(url_for('dashboard'))
             else:
                 flash('Invalid username or password.', 'danger')
+        else:
+            flash('Database connection error. Please try again.', 'danger')
 
     return render_template('login.html')
 
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
-    """New account registration."""
     if request.method == 'POST':
         name = request.form['name']
         email = request.form['email']
@@ -122,20 +130,16 @@ def register():
         if conn:
             try:
                 cursor = conn.cursor()
-
-                # Create customer
-                cursor.execute("""INSERT INTO customers 
+                cursor.execute("""INSERT INTO customers
                                   (name, email, phone, address, dob, account_type, balance)
                                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
                                (name, email, phone, address, dob, account_type, initial_deposit))
                 account_number = cursor.lastrowid
 
-                # Record initial deposit transaction
                 record_transaction(cursor, account_number, 'Deposit', initial_deposit,
                                    initial_deposit, None, 'Initial deposit at account opening')
 
-                # Create user login
-                cursor.execute("""INSERT INTO users (username, password, role, account_number) 
+                cursor.execute("""INSERT INTO users (username, password, role, account_number)
                                   VALUES (%s, %s, 'Customer', %s)""",
                                (username, password, account_number))
 
@@ -154,7 +158,6 @@ def register():
 
 @app.route('/logout')
 def logout():
-    """Logout user."""
     session.clear()
     flash('You have been logged out.', 'info')
     return redirect(url_for('login'))
@@ -167,23 +170,18 @@ def logout():
 @app.route('/dashboard')
 @login_required
 def dashboard():
-    """Customer dashboard showing account summary."""
     conn = get_db_connection()
     if conn:
         cursor = conn.cursor(dictionary=True)
-
-        # Get account details
         cursor.execute("SELECT * FROM customers WHERE account_number = %s",
                         (session['account_number'],))
         account = cursor.fetchone()
 
-        # Get recent transactions (last 5)
-        cursor.execute("""SELECT * FROM transactions 
-                          WHERE account_number = %s 
+        cursor.execute("""SELECT * FROM transactions
+                          WHERE account_number = %s
                           ORDER BY transaction_date DESC LIMIT 5""",
                         (session['account_number'],))
         recent_txns = cursor.fetchall()
-
         conn.close()
         return render_template('dashboard.html', account=account, transactions=recent_txns)
 
@@ -193,12 +191,11 @@ def dashboard():
 
 # ──────────────────────────────────────────
 #  Deposit
-# ──────────────────────────────────────────
+# ───────────────────��──────────────────────
 
 @app.route('/deposit', methods=['GET', 'POST'])
 @login_required
 def deposit():
-    """Deposit money into own account."""
     if request.method == 'POST':
         amount = float(request.form['amount'])
         description = request.form.get('description', 'Cash deposit')
@@ -213,14 +210,9 @@ def deposit():
                 cursor = conn.cursor()
                 acc_no = session['account_number']
 
-                # Update balance
                 cursor.execute("UPDATE customers SET balance = balance + %s WHERE account_number = %s",
                                (amount, acc_no))
-
-                # Get new balance
                 new_balance = get_account_balance(conn, acc_no)
-
-                # Record transaction
                 record_transaction(cursor, acc_no, 'Deposit', amount,
                                    new_balance, None, description)
 
@@ -244,7 +236,6 @@ def deposit():
 @app.route('/withdraw', methods=['GET', 'POST'])
 @login_required
 def withdraw():
-    """Withdraw money from own account."""
     conn = get_db_connection()
     current_balance = get_account_balance(conn, session['account_number']) if conn else 0
     if conn:
@@ -268,13 +259,9 @@ def withdraw():
                 cursor = conn.cursor()
                 acc_no = session['account_number']
 
-                # Update balance
                 cursor.execute("UPDATE customers SET balance = balance - %s WHERE account_number = %s",
                                (amount, acc_no))
-
                 new_balance = get_account_balance(conn, acc_no)
-
-                # Record transaction
                 record_transaction(cursor, acc_no, 'Withdrawal', amount,
                                    new_balance, None, description)
 
@@ -292,18 +279,17 @@ def withdraw():
 
 
 # ──────────────────────────────────────────
-#  Fund Transfer (Deposit + Withdrawal)
+#  Fund Transfer (Withdrawal + Deposit)
 # ──────────────────────────────────────────
 
 @app.route('/transfer', methods=['GET', 'POST'])
 @login_required
 def transfer():
-    """Transfer funds between accounts.
-    
-    This performs:
-    - WITHDRAWAL from sender's account
-    - DEPOSIT into receiver's account
-    Both are recorded as linked transactions.
+    """
+    Fund Transfer Logic:
+    1. WITHDRAW from sender's account
+    2. DEPOSIT into receiver's account
+    Both recorded as linked transactions.
     """
     conn = get_db_connection()
     current_balance = get_account_balance(conn, session['account_number']) if conn else 0
@@ -314,7 +300,6 @@ def transfer():
         target_account = int(request.form['target_account'])
         amount = float(request.form['amount'])
         description = request.form.get('description', '')
-
         sender_acc = session['account_number']
 
         # Validations
@@ -342,6 +327,7 @@ def transfer():
 
                 if not recipient:
                     flash('Recipient account not found. Please check the account number.', 'danger')
+                    conn.close()
                     return render_template('transfer.html', balance=current_balance)
 
                 # ── STEP 1: WITHDRAW from sender ──
@@ -349,7 +335,6 @@ def transfer():
                                (amount, sender_acc))
                 sender_new_balance = get_account_balance(conn, sender_acc)
 
-                # Record sender's withdrawal (Transfer Sent)
                 sender_desc = f"Fund transfer to {recipient['name']} (A/C: {target_account})"
                 if description:
                     sender_desc += f" - {description}"
@@ -362,7 +347,6 @@ def transfer():
                                (amount, target_account))
                 receiver_new_balance = get_account_balance(conn, target_account)
 
-                # Get sender name for receiver's record
                 cursor.execute("SELECT name FROM customers WHERE account_number = %s", (sender_acc,))
                 sender_info = cursor.fetchone()
 
@@ -394,12 +378,11 @@ def transfer():
 @app.route('/transactions')
 @login_required
 def transactions():
-    """View full transaction history."""
     conn = get_db_connection()
     if conn:
         cursor = conn.cursor(dictionary=True)
-        cursor.execute("""SELECT * FROM transactions 
-                          WHERE account_number = %s 
+        cursor.execute("""SELECT * FROM transactions
+                          WHERE account_number = %s
                           ORDER BY transaction_date DESC""",
                         (session['account_number'],))
         all_txns = cursor.fetchall()
@@ -411,13 +394,12 @@ def transactions():
 
 
 # ──────────────────────────────────────────
-#  Account Profile
+#  Profile
 # ──────────────────────────────────────────
 
 @app.route('/profile', methods=['GET', 'POST'])
 @login_required
 def profile():
-    """View and update account profile."""
     conn = get_db_connection()
 
     if request.method == 'POST':
@@ -454,7 +436,6 @@ def profile():
 @app.route('/admin')
 @admin_required
 def admin_dashboard():
-    """Admin dashboard with summary statistics."""
     conn = get_db_connection()
     if conn:
         cursor = conn.cursor(dictionary=True)
@@ -462,8 +443,8 @@ def admin_dashboard():
         cursor.execute("SELECT COUNT(*) as total FROM customers")
         total_accounts = cursor.fetchone()['total']
 
-        cursor.execute("SELECT SUM(balance) as total FROM customers")
-        total_balance = cursor.fetchone()['total'] or 0
+        cursor.execute("SELECT COALESCE(SUM(balance), 0) as total FROM customers")
+        total_balance = cursor.fetchone()['total']
 
         cursor.execute("SELECT COUNT(*) as total FROM transactions WHERE DATE(transaction_date) = CURDATE()")
         today_txns = cursor.fetchone()['total']
@@ -487,7 +468,6 @@ def admin_dashboard():
 @app.route('/admin/accounts')
 @admin_required
 def admin_accounts():
-    """Admin view all accounts."""
     conn = get_db_connection()
     if conn:
         cursor = conn.cursor(dictionary=True)
@@ -503,7 +483,6 @@ def admin_accounts():
 @app.route('/admin/account/<int:acc_no>/transactions')
 @admin_required
 def admin_account_transactions(acc_no):
-    """Admin view transactions for a specific account."""
     conn = get_db_connection()
     if conn:
         cursor = conn.cursor(dictionary=True)
@@ -511,7 +490,7 @@ def admin_account_transactions(acc_no):
         cursor.execute("SELECT * FROM customers WHERE account_number = %s", (acc_no,))
         account = cursor.fetchone()
 
-        cursor.execute("""SELECT * FROM transactions WHERE account_number = %s 
+        cursor.execute("""SELECT * FROM transactions WHERE account_number = %s
                           ORDER BY transaction_date DESC""", (acc_no,))
         txns = cursor.fetchall()
 
@@ -527,4 +506,5 @@ def admin_account_transactions(acc_no):
 # ──────────────────────────────────────────
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
