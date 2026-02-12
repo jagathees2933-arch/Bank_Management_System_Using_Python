@@ -2,15 +2,9 @@ import mysql.connector
 from mysql.connector import Error
 import os
 from dotenv import load_dotenv
-
-# Load environment variables from .env file (for local development)
 load_dotenv()
 
 def get_db_connection():
-    """
-    Create and return a MySQL database connection.
-    Configured for Render environment variables.
-    """
     try:
         connection = mysql.connector.connect(
             host=os.environ.get('MYSQL_HOST', 'localhost'),
